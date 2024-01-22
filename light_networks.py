@@ -13,6 +13,7 @@ import time
 import os
 import math
 import matplotlib.pyplot as plt
+from torch.autograd import Variable
 
 
 class Light_Dense_Layer(nn.Module):
@@ -140,34 +141,40 @@ class LightIReDNet(nn.Module):
         return x, x_list
     
 
-
 class LightIReDNet_LSTM(nn.Module):
     def __init__(self, recurrent_iter=6, use_GPU=True):
         super(LightIReDNet_LSTM, self).__init__()
         self.iteration = recurrent_iter
         self.use_GPU = use_GPU
 
+        # Initial Convolutional Layer
         self.conv0 = nn.Sequential(
             nn.Conv2d(6, 16, 3, 1, 1),
             nn.ReLU()
-            )
+        )
+
+        # LSTM Convolutional Layers
         self.conv_i = nn.Sequential(
             nn.Conv2d(16 + 16, 16, 3, 1, 1),
             nn.Sigmoid()
-            )
+        )
         self.conv_f = nn.Sequential(
             nn.Conv2d(16 + 16, 16, 3, 1, 1),
             nn.Sigmoid()
-            )
+        )
         self.conv_g = nn.Sequential(
             nn.Conv2d(16 + 16, 16, 3, 1, 1),
             nn.Tanh()
-            )
+        )
         self.conv_o = nn.Sequential(
             nn.Conv2d(16 + 16, 16, 3, 1, 1),
             nn.Sigmoid()
-            )
+        )
+
+        # Light Dense Block
         self.dense_block = Light_Dense_Block(4, 16, growthrate=16)
+
+        # Final Convolution
         self.conv = nn.Conv2d(80, 3, 3, 1, 1)
 
     def forward(self, input):
@@ -175,24 +182,30 @@ class LightIReDNet_LSTM(nn.Module):
             input = input.cuda()
 
         x = input
-        h = torch.zeros(input.size(0), 16, input.size(2), input.size(3), device=input.device)
-        c = torch.zeros_like(h)
+        h = Variable(torch.zeros(input.size(0), 16, input.size(2), input.size(3), device=input.device))
+        c = Variable(torch.zeros_like(h))
 
         x_list = []
         for _ in range(self.iteration):
             combined = torch.cat((input, x), 1)
             combined = self.conv0(combined)
+
+            # LSTM forward pass
             combined = torch.cat((combined, h), 1)
             i = self.conv_i(combined)
             f = self.conv_f(combined)
             g = self.conv_g(combined)
             o = self.conv_o(combined)
+
             c = f * c + i * g
             h = o * torch.tanh(c)
+
             x = h
+
             x = self.dense_block(x)
 
             x = self.conv(x)
+            x = x + input
             x_list.append(x)
         return x, x_list
     
@@ -209,21 +222,21 @@ class LightIReDNet_GRU(nn.Module):
             nn.ReLU()
         )
 
-        # GRU-like gates using Convolution
+        # GRU-like gates
         self.conv_z = nn.Sequential(
             nn.Conv2d(16 + 16, 16, 3, 1, 1),
             nn.Sigmoid()
         )
-        self.conv_r = nn.Sequential(
+        self.conv_b = nn.Sequential(
             nn.Conv2d(16 + 16, 16, 3, 1, 1),
             nn.Sigmoid()
         )
-        self.conv_h = nn.Sequential(
+        self.conv_g = nn.Sequential(
             nn.Conv2d(16 + 16, 16, 3, 1, 1),
             nn.Tanh()
         )
 
-        # Dense Block
+        # Light Dense Block
         self.dense_block = Light_Dense_Block(4, 16, growthrate=16)
 
         # Final Convolution
@@ -234,29 +247,32 @@ class LightIReDNet_GRU(nn.Module):
             input = input.cuda()
 
         x = input
-        h = torch.zeros(input.size(0), 16, input.size(2), input.size(3), device=input.device)
+        h = Variable(torch.zeros(input.size(0), 16, input.size(2), input.size(3)))
+        if self.use_GPU:
+            h = h.cuda()
 
         x_list = []
         for _ in range(self.iteration):
-            combined = torch.cat((input, x), 1)
-            combined = self.conv0(combined)
-            combined_with_h = torch.cat((combined, h), 1)
+            x = torch.cat((input, x), 1)
+            x = self.conv0(x)
 
-            z = self.conv_z(combined_with_h)
-            r = self.conv_r(combined_with_h)
+            x1 = torch.cat((x, h), 1)
+            z = self.conv_z(x1)
+            b = self.conv_b(x1)
+            s = b * h
+            s = torch.cat((s, x), 1)
+            g = self.conv_g(s)
+            h = (1 - z) * h + z * g
 
-            combined_reset = torch.cat((combined, r * h), 1)
-            h_tilde = self.conv_h(combined_reset)
-
-            h = (1 - z) * h + z * h_tilde
-
-            x = self.dense_block(h)
-
+            x = h
+            x = self.dense_block(x)
             x = self.conv(x)
-            x = x + input
+            x = x + input  # Adding skip connection
             x_list.append(x)
+
         return x, x_list
     
+
 class LightIReDNet_BiRNN(nn.Module):
     def __init__(self, recurrent_iter=6, use_GPU=True):
         super(LightIReDNet_BiRNN, self).__init__()
@@ -330,122 +346,45 @@ class LightIReDNet_IndRNN(nn.Module):
             nn.ReLU()
         )
 
-        # Independently Recurrent Convolutional Layer
-        self.indrnn = nn.Sequential(
-            nn.Conv2d(16 + 16, 16, 3, 1, 1),
-            nn.ReLU()
-        )
+        # IndRNN layers
+        self.recurrent_layers = nn.ModuleList([
+            nn.Sequential(
+                nn.Conv2d(16 + 16, 16, 3, 1, 1),  # Convolution for each IndRNN cell
+                nn.ReLU()
+            ) for _ in range(self.iteration)
+        ])
 
-        # Dense Block
+        # Dense Block (assuming a compatible Dense Block implementation)
         self.dense_block = Light_Dense_Block(4, 16, growthrate=16)
 
         # Final Convolution
         self.conv = nn.Conv2d(80, 3, 3, 1, 1)
 
     def forward(self, input):
-        if self.use_GPU:
-            input = input.cuda()
+        batch_size, row, col = input.size(0), input.size(2), input.size(3)
 
         x = input
-        h = torch.zeros(input.size(0), 16, input.size(2), input.size(3), device=input.device)
+        h = Variable(torch.zeros(batch_size, 16, row, col))
+        if self.use_GPU:
+            h = h.cuda()
 
         x_list = []
-        for _ in range(self.iteration):
+        for i in range(self.iteration):
             combined = torch.cat((input, x), 1)
             combined = self.conv0(combined)
             combined = torch.cat((combined, h), 1)
+            h = self.recurrent_layers[i](combined)
 
-            h = self.indrnn(combined)
+            x = h
 
-            x = self.dense_block(h)
-
+            x = self.dense_block(x)
             x = self.conv(x)
-            x = x + input
             x_list.append(x)
         return x, x_list
-
-
-class ConvLSTMCell(nn.Module):
-    def __init__(self, input_dim, hidden_dim, kernel_size, bias):
-        """
-        Initialize ConvLSTM cell.
-        """
-        super(ConvLSTMCell, self).__init__()
-
-        self.input_dim = input_dim
-        self.hidden_dim = hidden_dim
-        self.kernel_size = kernel_size
-        self.padding = kernel_size[0] // 2, kernel_size[1] // 2
-        self.bias = bias
-
-        self.conv = nn.Conv2d(in_channels=self.input_dim + self.hidden_dim,
-                              out_channels=4 * self.hidden_dim,
-                              kernel_size=self.kernel_size,
-                              padding=self.padding,
-                              bias=self.bias)
-
-    def forward(self, x, cur_state):
-        h_cur, c_cur = cur_state
-        combined = torch.cat([x, h_cur], dim=1)
-        combined_conv = self.conv(combined)
-        cc_i, cc_f, cc_o, cc_g = torch.split(combined_conv, self.hidden_dim, dim=1)
-        i = torch.sigmoid(cc_i)
-        f = torch.sigmoid(cc_f)
-        o = torch.sigmoid(cc_o)
-        g = torch.tanh(cc_g)
-
-        c_next = f * c_cur + i * g
-        h_next = o * torch.tanh(c_next)
-
-        return h_next, c_next
-
-    def init_hidden(self, batch_size, image_size):
-        height, width = image_size
-        return (torch.zeros(batch_size, self.hidden_dim, height, width, device=self.conv.weight.device),
-                torch.zeros(batch_size, self.hidden_dim, height, width, device=self.conv.weight.device))
-
-
+    
 class LightIReDNet_ConvLSTM(nn.Module):
     def __init__(self, recurrent_iter=6, use_GPU=True):
         super(LightIReDNet_ConvLSTM, self).__init__()
-        self.iteration = recurrent_iter
-        self.use_GPU = use_GPU
-
-        self.conv0 = nn.Sequential(
-            nn.Conv2d(6, 16, 3, 1, 1),
-            nn.ReLU()
-        )
-
-        self.convLSTM = ConvLSTMCell(input_dim=16, hidden_dim=16, kernel_size=(3, 3), bias=True)
-
-        self.dense_block = Light_Dense_Block(4, 16, growthrate=16)
-
-        self.conv = nn.Conv2d(80, 3, 3, 1, 1)
-
-    def forward(self, input):
-        if self.use_GPU:
-            input = input.cuda()
-
-        x = input
-        h, c = self.convLSTM.init_hidden(input.size(0), (input.size(2), input.size(3)))
-
-        x_list = []
-        for _ in range(self.iteration):
-            combined = torch.cat((input, x), 1)
-            combined = self.conv0(combined)
-
-            h, c = self.convLSTM(combined, (h, c))
-            x = self.dense_block(h)
-
-            x = self.conv(x)
-            x = x + input
-            x_list.append(x)
-
-        return x, x_list
-
-class LightIReDNet_QRNN(nn.Module):
-    def __init__(self, recurrent_iter=6, use_GPU=True):
-        super(LightIReDNet_QRNN, self).__init__()
         self.iteration = recurrent_iter
         self.use_GPU = use_GPU
 
@@ -455,21 +394,13 @@ class LightIReDNet_QRNN(nn.Module):
             nn.ReLU()
         )
 
-        # QRNN-like gates using Convolution
-        self.conv_f = nn.Sequential(
-            nn.Conv2d(16 + 16, 16, 3, 1, 1),
-            nn.Sigmoid()
-        )
-        self.conv_z = nn.Sequential(
-            nn.Conv2d(16 + 16, 16, 3, 1, 1),
-            nn.Sigmoid()
-        )
-        self.conv_o = nn.Sequential(
-            nn.Conv2d(16 + 16, 16, 3, 1, 1),
-            nn.Tanh()
-        )
+        # ConvLSTM Layers - reduced channel size for lightness
+        self.convLSTM_i = nn.Conv2d(16 + 16, 16, 3, 1, 1)
+        self.convLSTM_f = nn.Conv2d(16 + 16, 16, 3, 1, 1)
+        self.convLSTM_c = nn.Conv2d(16 + 16, 16, 3, 1, 1)
+        self.convLSTM_o = nn.Conv2d(16 + 16, 16, 3, 1, 1)
 
-        # Dense Block
+        # Light Dense Block
         self.dense_block = Light_Dense_Block(4, 16, growthrate=16)
 
         # Final Convolution
@@ -481,22 +412,85 @@ class LightIReDNet_QRNN(nn.Module):
 
         x = input
         h = torch.zeros(input.size(0), 16, input.size(2), input.size(3), device=input.device)
+        c = torch.zeros_like(h)
 
         x_list = []
         for _ in range(self.iteration):
             combined = torch.cat((input, x), 1)
             combined = self.conv0(combined)
-            combined_with_h = torch.cat((combined, h), 1)
 
-            f = self.conv_f(combined_with_h)
-            z = self.conv_z(combined_with_h)
-            o = self.conv_o(combined_with_h)
+            # ConvLSTM calculations
+            i = torch.sigmoid(self.convLSTM_i(torch.cat((combined, h), 1)))
+            f = torch.sigmoid(self.convLSTM_f(torch.cat((combined, h), 1)))
+            o = torch.sigmoid(self.convLSTM_o(torch.cat((combined, h), 1)))
+            c_tilde = torch.tanh(self.convLSTM_c(torch.cat((combined, h), 1)))
 
-            h = (f * h) + ((1 - f) * z)
+            c = f * c + i * c_tilde
+            h = o * torch.tanh(c)
 
-            x = self.dense_block(o * h)
-
+            x = self.dense_block(h)
             x = self.conv(x)
             x = x + input
             x_list.append(x)
+        return x, x_list
+
+class LightIReDNet_QRNN(nn.Module):
+    def __init__(self, recurrent_iter=6, use_GPU=True):
+        super(LightIReDNet_QRNN, self).__init__()
+        self.iteration = recurrent_iter
+        self.use_GPU = use_GPU
+
+        # Initial convolutional layer with reduced number of filters
+        self.conv0 = nn.Sequential(
+            nn.Conv2d(6, 16, 3, 1, 1),  # Reduced filters from 32 to 16
+            nn.ReLU()
+        )
+
+        # Simplified QRNN layers with fewer filters
+        self.conv_f = nn.Sequential(
+            nn.Conv2d(16 + 16, 16, 3, 1, 1),  # Reduced filters from 32 to 16
+            nn.Sigmoid()
+        )
+        self.conv_z = nn.Sequential(
+            nn.Conv2d(16 + 16, 16, 3, 1, 1),  # Reduced filters from 32 to 16
+            nn.Sigmoid()
+        )
+        self.conv_o = nn.Sequential(
+            nn.Conv2d(16 + 16, 16, 3, 1, 1),  # Reduced filters from 32 to 16
+            nn.Tanh()
+        )
+
+        # Light Dense Block (assuming a similar structure to LightIReDNet_BiRNN)
+        self.dense_block = Light_Dense_Block(4, 16, growthrate=16)
+
+        # Final Convolution with adjusted number of input filters
+        self.conv = nn.Conv2d(80, 3, 3, 1, 1)  # Adjusted input filters
+
+    def forward(self, input):
+        batch_size, row, col = input.size(0), input.size(2), input.size(3)
+
+        x = input
+        h = Variable(torch.zeros(batch_size, 16, row, col))  # Adjusted number of filters
+
+        if self.use_GPU:
+            h = h.cuda()
+
+        x_list = []
+        for _ in range(self.iteration):
+            x = torch.cat((input, x), 1)
+            x = self.conv0(x)
+
+            combined = torch.cat((x, h), 1)
+            f = self.conv_f(combined)
+            z = self.conv_z(combined)
+            o = self.conv_o(combined)
+
+            h = (1 - z) * h + z * o
+
+            x = self.dense_block(h)
+            x = self.conv(x)
+
+            x = x + input  # Skip connection
+            x_list.append(x)
+
         return x, x_list

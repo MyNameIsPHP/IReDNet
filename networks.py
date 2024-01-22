@@ -459,8 +459,7 @@ class IReDNet_IndRNN(nn.Module):
             x_list.append(x)
         return x, x_list
     
-
-    
+  
 class IReDNet_QRNN(nn.Module):
     def __init__(self, recurrent_iter=6, use_GPU=True):
         super(IReDNet_QRNN, self).__init__()
