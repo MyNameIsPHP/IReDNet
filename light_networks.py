@@ -330,11 +330,13 @@ class LightIReDNet_IndRNN(nn.Module):
             nn.ReLU()
         )
 
-        # Independently Recurrent Convolutional Layer
-        self.indrnn = nn.Sequential(
-            nn.Conv2d(16 + 16, 16, 3, 1, 1),
-            nn.ReLU()
-        )
+        # IndRNN layers
+        self.recurrent_layers = nn.ModuleList([
+            nn.Sequential(
+                nn.Conv2d(16 + 16, 16, 3, 1, 1),  # Convolution for each IndRNN cell
+                nn.ReLU()
+            ) for _ in range(self.iteration)
+        ])
 
         # Dense Block
         self.dense_block = Light_Dense_Block(4, 16, growthrate=16)
@@ -342,25 +344,26 @@ class LightIReDNet_IndRNN(nn.Module):
         # Final Convolution
         self.conv = nn.Conv2d(80, 3, 3, 1, 1)
 
+
     def forward(self, input):
-        if self.use_GPU:
-            input = input.cuda()
+        batch_size, row, col = input.size(0), input.size(2), input.size(3)
 
         x = input
-        h = torch.zeros(input.size(0), 16, input.size(2), input.size(3), device=input.device)
+        h = Variable(torch.zeros(batch_size, 16, row, col))
+        if self.use_GPU:
+            h = h.cuda()
 
         x_list = []
-        for _ in range(self.iteration):
+        for i in range(self.iteration):
             combined = torch.cat((input, x), 1)
             combined = self.conv0(combined)
             combined = torch.cat((combined, h), 1)
+            h = self.recurrent_layers[i](combined)
 
-            h = self.indrnn(combined)
+            x = h
 
-            x = self.dense_block(h)
-
+            x = self.dense_block(x)
             x = self.conv(x)
-            x = x + input
             x_list.append(x)
         return x, x_list
 
